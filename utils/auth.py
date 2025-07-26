@@ -1,5 +1,9 @@
 import os
 
-def verify_bearer_token(token: str) -> bool:
-    expected = f"Bearer {os.getenv('HACKRX_AUTH_TOKEN')}"
+
+def verify_token(token: str) -> bool:
+    """Check if the provided token matches the API token."""
+    expected = os.getenv("API_TOKEN")
+    if expected is None:
+        return False
     return token == expected
