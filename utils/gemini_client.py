@@ -19,11 +19,11 @@ class GeminiClient:
             raise ValueError("GEMINI_API_KEY not found in environment variables.")
         genai.configure(api_key=api_key)
         self.model = None
-        logger.info("GeminiClient initialized")
+        logger.info("GeminiClient initialized with gemini-1.5-flash")
 
     def _ensure_model(self) -> None:
         if self.model is None:
-            self.model = genai.GenerativeModel("gemini-pro")
+            self.model = genai.GenerativeModel("models/gemini-1.5-flash")
 
     async def answer_question(self, document_text: str, question: str) -> str:
         """Generate an answer for the given question based on the document."""
@@ -32,15 +32,17 @@ class GeminiClient:
             "content provided. If the answer is not in the document, reply that it is not available.\n\n"
             f"DOCUMENT:\n{document_text}\n\nQUESTION: {question}\nANSWER:"
         )
+        logger.debug("Gemini prompt: %s", prompt)
         loop = asyncio.get_event_loop()
         try:
             self._ensure_model()
             response = await loop.run_in_executor(
                 None, lambda: self.model.generate_content(prompt)
             )
-            return response.text.strip() if response.text else ""
+            text = getattr(response, "text", None)
+            return text.strip() if text else ""
         except Exception as exc:
-            logger.error("Gemini API error: %s", exc)
+            logger.exception("Gemini API error")
             raise
 
     async def test_connection(self) -> bool:
@@ -48,5 +50,6 @@ class GeminiClient:
         try:
             resp = await self.answer_question("test", "reply with 'ok'")
             return bool(resp)
-        except Exception:
+        except Exception as exc:
+            logger.error("Gemini connection test failed: %s", exc)
             return False
