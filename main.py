@@ -7,8 +7,7 @@ from fastapi import (
     Depends,
     status,
     UploadFile,
-    File,
-    Form,
+    Request,
 )
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
@@ -73,28 +72,67 @@ async def health_check():
 
 
 @app.post("/hackrx/run", response_model=DocumentQueryResponse)
-async def run_query(
-    question: str = Form(...),
-    file: UploadFile = File(...),
-    token: str = Depends(get_current_user),
-):
-    try:
-        document_text = await pdf_loader.extract_text(file)
-    except Exception as exc:
-        logger.error("Failed to load document: %s", exc)
-        raise HTTPException(status_code=400, detail="Failed to read document") from exc
+async def run_query(request: Request, token: str = Depends(get_current_user)):
+    raw_body = await request.body()
+    logger.info("Raw request body: %s", raw_body)
 
-    try:
-        answer = await ollama_client.answer_question(document_text, question)
-    except Exception as exc:
-        logger.error("Ollama processing error: %s", exc)
-        raise HTTPException(status_code=500, detail="LLM processing failed") from exc
+    questions: list[str] = []
+    document_text = ""
+    file_name: str | None = None
+
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        q_single = payload.get("question")
+        if isinstance(q_single, str):
+            questions.append(q_single)
+        q_list = payload.get("questions")
+        if isinstance(q_list, list):
+            questions.extend([q for q in q_list if isinstance(q, str)])
+        docs = payload.get("documents")
+        if isinstance(docs, str):
+            document_text = docs
+    else:
+        form = await request.form()
+        q_single = form.get("question")
+        if isinstance(q_single, str):
+            questions.append(q_single)
+        q_list = form.getlist("questions")
+        for q in q_list:
+            if isinstance(q, str):
+                questions.append(q)
+        docs = form.get("documents")
+        if isinstance(docs, str):
+            document_text = docs
+        upload = form.get("file")
+        if isinstance(upload, UploadFile):
+            file_name = upload.filename
+            data = await upload.read()
+            logger.info("Uploaded file %s (%d bytes)", file_name, len(data))
+            await upload.seek(0)
+            try:
+                pdf_text = await pdf_loader.extract_text(upload)
+                document_text = document_text + ("\n" if document_text else "") + pdf_text
+            except Exception as exc:
+                logger.error("Failed to load document: %s", exc)
+
+    answers: list[str] = []
+    for q in questions:
+        try:
+            ans = await ollama_client.answer_question(document_text, q)
+        except Exception as exc:
+            logger.error("Ollama processing error: %s", exc)
+            ans = ""
+        answers.append(ans)
 
     return DocumentQueryResponse(
         status="success",
-        query=question,
-        answer=answer,
-        file_name=file.filename or "uploaded",
+        query=questions,
+        answer=answers,
+        file_name=file_name,
     )
 
 
