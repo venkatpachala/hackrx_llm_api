@@ -16,7 +16,7 @@ import uvicorn
 
 from utils.auth import verify_token
 from utils.pdf_loader import PDFLoader
-from utils.gemini_client import GeminiClient
+from utils.ollama_client import OllamaClient
 from schemas import DocumentQueryResponse
 from fastapi.openapi.utils import get_openapi
 
@@ -28,7 +28,7 @@ load_dotenv()
 
 app = FastAPI(
     title="HACKRX 6.0 - LLM Document Query API",
-    description="An intelligent document understanding and retrieval system powered by Gemini Pro",
+    description="An intelligent document understanding and retrieval system powered by a local Ollama model",
     version="1.0.0",
 )
 
@@ -42,7 +42,7 @@ app.add_middleware(
 
 security = HTTPBearer()
 pdf_loader = PDFLoader()
-gemini_client = GeminiClient()
+ollama_client = OllamaClient()
 
 
 async def get_current_user(
@@ -68,7 +68,7 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    status_ok = await gemini_client.test_connection()
+    status_ok = await ollama_client.test_connection()
     return {"status": "healthy" if status_ok else "unhealthy"}
 
 
@@ -85,9 +85,9 @@ async def run_query(
         raise HTTPException(status_code=400, detail="Failed to read document") from exc
 
     try:
-        answer = await gemini_client.answer_question(document_text, question)
+        answer = await ollama_client.answer_question(document_text, question)
     except Exception as exc:
-        logger.error("Gemini processing error: %s", exc)
+        logger.error("Ollama processing error: %s", exc)
         raise HTTPException(status_code=500, detail="LLM processing failed") from exc
 
     return DocumentQueryResponse(
