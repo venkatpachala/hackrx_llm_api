@@ -45,6 +45,26 @@ class OllamaClient:
         )
         return await self.generate(prompt)
 
+    async def extract_entities(self, query: str) -> str:
+        """Extract structured entities from ``query`` as JSON."""
+
+        prompt = (
+            "Extract key details such as age, procedure, location and policy duration "
+            "from the following query. Return a JSON object with these fields if present.\nQuery:\n"
+            f"{query}\nJSON:"
+        )
+        return await self.generate(prompt)
+
+    async def rag_answer(self, question: str, context: str) -> str:
+        """Answer ``question`` using ``context`` and return JSON output."""
+
+        prompt = (
+            "You are an insurance assistant. Use only the provided context to answer the question. "
+            "Respond in JSON with fields: decision, amount, justification.\n\nContext:\n"
+            f"{context}\n\nQuestion:\n{question}\nAnswer JSON:"
+        )
+        return await self.generate(prompt)
+
     async def test_connection(self) -> bool:
         """Basic check to see if the Ollama service is reachable."""
 

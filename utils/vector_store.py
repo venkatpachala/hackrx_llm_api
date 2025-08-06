@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, List
+from typing import Any, List, Dict
+
 
 # Heavy dependencies are imported lazily in ``__init__`` so importing this
 # module does not require them unless the vector store is actually used.
@@ -22,9 +23,10 @@ class VectorStore:
         self.np = np
         self.index: Any | None = None
         self.texts: List[str] = []
+        self.metadatas: List[Dict] = []
 
-    async def add_texts(self, texts: List[str]) -> None:
-        """Embed and index ``texts``."""
+    async def add_texts(self, texts: List[str], metadatas: List[Dict]) -> None:
+        """Embed and index ``texts`` with their ``metadatas``."""
 
         if not texts:
             return
@@ -37,8 +39,9 @@ class VectorStore:
             self.index = self.faiss.IndexFlatL2(vectors.shape[1])
         self.index.add(vectors)
         self.texts.extend(texts)
+        self.metadatas.extend(metadatas)
 
-    async def similarity_search(self, query: str, k: int = 5) -> List[str]:
+    async def similarity_search(self, query: str, k: int = 5) -> List[Dict]:
         """Return the top ``k`` chunks most similar to ``query``."""
 
         if not self.index or not self.texts:
@@ -48,5 +51,10 @@ class VectorStore:
         )
         vector = self.np.array(embedding).astype("float32")
         _, idxs = self.index.search(vector, k)
-        return [self.texts[i] for i in idxs[0] if i < len(self.texts)]
-
+        results: List[Dict] = []
+        for i in idxs[0]:
+            if i < len(self.texts):
+                meta = self.metadatas[i].copy()
+                meta["text"] = self.texts[i]
+                results.append(meta)
+        return results
