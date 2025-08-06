@@ -30,7 +30,20 @@ class Chunk:
 class DocumentLoader:
     """Load multiple document types and chunk them for RAG."""
 
-    def __init__(self, chunk_tokens: int = 1000, overlap_tokens: int = 200) -> None:
+    def __init__(self, chunk_tokens: int = 1500, overlap_tokens: int = 200) -> None:
+        """Create a new ``DocumentLoader``.
+
+        Parameters
+        ----------
+        chunk_tokens:
+            Approximate number of tokens (here treated as words) per chunk.  The
+            default of ``1500`` is tuned for large documents (\u2265 1000 pages) so
+            that each piece fed to the language model remains manageable.
+        overlap_tokens:
+            Number of words to overlap between consecutive chunks.  This helps
+            maintain context continuity across chunk boundaries.
+        """
+
         self.chunk_tokens = chunk_tokens
         self.overlap_tokens = overlap_tokens
 
