@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
-import requests
+import httpx
 
 
 logger = logging.getLogger(__name__)
@@ -19,24 +18,21 @@ class OllamaClient:
         self.model = model
         self.url = "http://localhost:11434/api/generate"
         self.timeout = timeout
+        self._client = httpx.AsyncClient(timeout=self.timeout)
         logger.info("OllamaClient initialized with model %s", self.model)
 
-    def _post(self, prompt: str) -> str:
+    async def generate(self, prompt: str) -> str:
+        """Send ``prompt`` to Ollama and return the generated text."""
+
         payload: dict[str, Any] = {
             "model": self.model,
             "prompt": prompt,
             "stream": False,
         }
-        response = requests.post(self.url, json=payload, timeout=self.timeout)
+        response = await self._client.post(self.url, json=payload)
         response.raise_for_status()
         data = response.json()
         return data.get("response", "").strip()
-
-    async def generate(self, prompt: str) -> str:
-        """Execute the blocking HTTP request in a thread."""
-
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, lambda: self._post(prompt))
 
     async def answer_question(self, context: str, question: str) -> str:
         """Build an optimized prompt with ``context`` and return the answer."""
@@ -58,4 +54,9 @@ class OllamaClient:
         except Exception as exc:  # pragma: no cover - best effort logging
             logger.error("Ollama connection test failed: %s", exc)
             return False
+
+    async def aclose(self) -> None:
+        """Close the underlying HTTP client."""
+
+        await self._client.aclose()
 
