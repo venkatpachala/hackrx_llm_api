@@ -15,9 +15,13 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 from utils.auth import verify_token
-from utils.pdf_loader import PDFLoader
+import base64
+import hashlib
+import json
+from utils.document_loader import DocumentLoader
+from utils.vector_store import VectorStore
 from utils.ollama_client import OllamaClient
-from schemas import DocumentQueryResponse
+from schemas import RAGResponse
 from fastapi.openapi.utils import get_openapi
 
 logging.basicConfig(level=logging.INFO)
@@ -41,7 +45,7 @@ app.add_middleware(
 )
 
 security = HTTPBearer()
-pdf_loader = PDFLoader()
+doc_loader = DocumentLoader()
 ollama_client = OllamaClient()
 
 
@@ -72,101 +76,125 @@ async def health_check():
     return {"status": "healthy" if status_ok else "unhealthy"}
 
 
-@app.post("/hackrx/run", response_model=DocumentQueryResponse)
+@app.post("/hackrx/run", response_model=RAGResponse)
 async def run_query(request: Request, token: str = Depends(get_current_user)):
-    raw_body = await request.body()
-    logger.info("Raw request body: %s", raw_body)
-
-    questions: list[str] = []
-    text_blobs: list[str] = []
-    file_name: str | None = None
-    upload: UploadFile | None = None
+    """Main RAG endpoint handling multiple documents and questions."""
 
     content_type = request.headers.get("content-type", "")
+    questions: list[str] = []
+    uploads: list[UploadFile] = []
+    b64_docs: list[tuple[str, str]] = []  # (data, name)
+
     if "application/json" in content_type:
         try:
             payload = await request.json()
         except Exception:
             payload = {}
-        q_single = payload.get("question")
-        if isinstance(q_single, str):
-            questions.append(q_single)
-        q_list = payload.get("questions")
+        q_list = payload.get("questions", [])
         if isinstance(q_list, list):
             questions.extend([q for q in q_list if isinstance(q, str)])
-        docs = payload.get("documents")
-        if isinstance(docs, str):
-            text_blobs.append(docs)
+        doc_list = payload.get("documents", [])
+        if isinstance(doc_list, list):
+            for idx, doc in enumerate(doc_list):
+                if isinstance(doc, dict):
+                    data = doc.get("data") or doc.get("content")
+                    name = doc.get("name", f"document_{idx}")
+                else:
+                    data = doc
+                    name = f"document_{idx}"
+                if isinstance(data, str):
+                    b64_docs.append((data, name))
     else:
         form = await request.form()
-        q_single = form.get("question")
-        if isinstance(q_single, str):
-            questions.append(q_single)
-        q_list = form.getlist("questions")
-        for q in q_list:
-            if isinstance(q, str):
-                questions.append(q)
-        docs = form.get("documents")
-        if isinstance(docs, str):
-            text_blobs.append(docs)
-        possible_upload = form.get("file")
-        if isinstance(possible_upload, UploadFile):
-            upload = possible_upload
-            file_name = upload.filename
+        questions.extend([q for q in form.getlist("questions") if isinstance(q, str)])
+        for file in form.getlist("documents"):
+            if isinstance(file, UploadFile):
+                uploads.append(file)
 
-    # ------------------------------------------------------------------
-    # Prepare chunks from supplied text and/or uploaded PDF
-    # ------------------------------------------------------------------
-    chunks: list[str] = []
+    if not questions:
+        raise HTTPException(status_code=400, detail="No questions provided")
 
-    for blob in text_blobs:
-        chunks.extend(pdf_loader.chunk_text(blob))
+    # Limit number and size of documents
+    if len(uploads) + len(b64_docs) > 10:
+        raise HTTPException(status_code=400, detail="Too many documents")
 
-    if upload is not None:
+    total_size = 0
+    for data, _ in b64_docs:
+        total_size += len(data) * 3 // 4
+    for up in uploads:
+        await up.seek(0, 2)
+        total_size += up.file.tell()
+        await up.seek(0)
+    if total_size > 200 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Payload too large")
+
+    # --------------------------------------------------------------
+    # Document processing
+    # --------------------------------------------------------------
+    cache: dict[str, list] = {}
+
+    async def process_bytes(data: bytes, name: str):
+        key = hashlib.md5(data).hexdigest()
+        if key in cache:
+            return cache[key]
+        chunks = await doc_loader.process_bytes(data, name)
+        cache[key] = chunks
+        return chunks
+
+    tasks = []
+    for up in uploads:
+        data = await up.read()
+        await up.seek(0)
+        tasks.append(process_bytes(data, up.filename))
+    for data, name in b64_docs:
         try:
-            pdf_chunks = await pdf_loader.extract_text_chunks(upload)
-            chunks.extend(pdf_chunks)
-            logger.info("Indexed %d chunks from %s", len(pdf_chunks), file_name)
-        except Exception as exc:
-            logger.error("Failed to load document: %s", exc)
+            raw = base64.b64decode(data)
+        except Exception:
+            continue
+        tasks.append(process_bytes(raw, name))
 
-    # ------------------------------------------------------------------
-    # Question processing helpers
-    # ------------------------------------------------------------------
-    async def process_question(question: str) -> str:
-        async def ask_chunk(chunk: str) -> str:
-            try:
-                return await asyncio.wait_for(
-                    ollama_client.answer_question(chunk, question), timeout=15
-                )
-            except Exception as exc:
-                logger.error("Chunk processing failed: %s", exc)
-                return ""
+    chunk_lists = await asyncio.gather(*tasks)
+    chunks = [c for lst in chunk_lists for c in lst]
 
-        partial_answers = await asyncio.gather(*(ask_chunk(c) for c in chunks))
-        partial_answers = [ans for ans in partial_answers if ans]
+    texts = [c.text for c in chunks]
+    metas = [c.metadata() for c in chunks]
 
-        if not partial_answers:
-            return "No relevant information found."
+    vector_store = VectorStore()
+    await vector_store.add_texts(texts, metas)
 
-        combined_context = "\n\n".join(partial_answers)
+    # --------------------------------------------------------------
+    # Question answering
+    # --------------------------------------------------------------
+    async def handle_question(q: str):
+        entity_raw = await ollama_client.extract_entities(q)
         try:
-            return await asyncio.wait_for(
-                ollama_client.answer_question(combined_context, question),
-                timeout=15,
-            )
-        except Exception as exc:
-            logger.error("Final summarization failed: %s", exc)
-            # Return concatenated partial answers if final step fails
-            return combined_context
+            entities = json.loads(entity_raw)
+            keywords = " ".join(str(v) for v in entities.values())
+        except Exception:
+            keywords = ""
+        search_query = f"{q} {keywords}".strip()
+        retrieved = await vector_store.similarity_search(search_query, k=5)
+        context = "\n\n".join([r["text"] for r in retrieved])
+        answer_raw = await ollama_client.rag_answer(q, context)
+        try:
+            answer = json.loads(answer_raw)
+        except Exception:
+            answer = {"decision": answer_raw, "amount": None, "justification": ""}
+        return answer, retrieved
 
-    answers = await asyncio.gather(*(process_question(q) for q in questions))
+    results = await asyncio.gather(*(handle_question(q) for q in questions))
+    answers = [res[0] for res in results]
+    retrieved_all = [r for res in results for r in res[1]]
 
-    return DocumentQueryResponse(
+    retrieved_clauses = [
+        {"file": r["file_name"], "page": r["page_range"], "clause": r["text"]}
+        for r in retrieved_all
+    ]
+
+    return RAGResponse(
         status="success",
-        query=questions,
-        answer=list(answers),
-        file_name=file_name,
+        answers=answers,
+        retrieved_clauses=retrieved_clauses,
     )
 
 
