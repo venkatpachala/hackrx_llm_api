@@ -15,8 +15,6 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 from utils.auth import verify_token
-import base64
-import hashlib
 import json
 from utils.document_loader import DocumentLoader
 from utils.vector_store import VectorStore
@@ -78,93 +76,98 @@ async def health_check():
 
 @app.post("/hackrx/run", response_model=RAGResponse)
 async def run_query(request: Request, token: str = Depends(get_current_user)):
-    """Main RAG endpoint handling multiple documents and questions."""
+    """Endpoint that performs retrieval augmented generation over documents."""
 
     content_type = request.headers.get("content-type", "")
+
+    # ------------------------------------------------------------------
+    # Parse input
+    # ------------------------------------------------------------------
     questions: list[str] = []
     uploads: list[UploadFile] = []
-    b64_docs: list[tuple[str, str]] = []  # (data, name)
+    text_docs: list[tuple[str, str]] = []  # (content, name)
 
     if "application/json" in content_type:
         try:
             payload = await request.json()
         except Exception:
             payload = {}
-        q_list = payload.get("questions", [])
+
+        # Questions can be under several possible keys
+        q_list = payload.get("questions")
         if isinstance(q_list, list):
             questions.extend([q for q in q_list if isinstance(q, str)])
+        for key in ("question", "query", "q"):
+            val = payload.get(key)
+            if isinstance(val, str):
+                questions.append(val)
+
         doc_list = payload.get("documents", [])
         if isinstance(doc_list, list):
             for idx, doc in enumerate(doc_list):
-                if isinstance(doc, dict):
-                    data = doc.get("data") or doc.get("content")
-                    name = doc.get("name", f"document_{idx}")
-                else:
-                    data = doc
-                    name = f"document_{idx}"
-                if isinstance(data, str):
-                    b64_docs.append((data, name))
+                if isinstance(doc, str):
+                    text_docs.append((doc, f"document_{idx}"))
     else:
         form = await request.form()
+
+        # Extract question(s) regardless of the parameter name
+        for key in ("question", "query", "q"):
+            val = form.get(key)
+            if isinstance(val, str):
+                questions.append(val)
         questions.extend([q for q in form.getlist("questions") if isinstance(q, str)])
-        for file in form.getlist("documents"):
-            if isinstance(file, UploadFile):
-                uploads.append(file)
+
+        # Collect files under "file" key (multiple allowed)
+        for f in form.getlist("file"):
+            if hasattr(f, "filename"):
+                uploads.append(f)
+        # Backwards compatibility: allow 'documents'
+        for f in form.getlist("documents"):
+            if hasattr(f, "filename"):
+                uploads.append(f)
 
     if not questions:
-        raise HTTPException(status_code=400, detail="No questions provided")
+        raise HTTPException(status_code=400, detail="No valid question provided")
 
-    # Limit number and size of documents
-    if len(uploads) + len(b64_docs) > 10:
+    # ------------------------------------------------------------------
+    # Validate document count and size
+    # ------------------------------------------------------------------
+    if len(uploads) + len(text_docs) > 10:
         raise HTTPException(status_code=400, detail="Too many documents")
 
+    max_total_size = 200 * 1024 * 1024  # 200 MB
     total_size = 0
-    for data, _ in b64_docs:
-        total_size += len(data) * 3 // 4
-    for up in uploads:
-        await up.seek(0, 2)
-        total_size += up.file.tell()
-        await up.seek(0)
-    if total_size > 200 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="Payload too large")
 
-    # --------------------------------------------------------------
-    # Document processing
-    # --------------------------------------------------------------
-    cache: dict[str, list] = {}
+    # ------------------------------------------------------------------
+    # Document processing and indexing
+    # ------------------------------------------------------------------
+    vector_store = VectorStore()
 
-    async def process_bytes(data: bytes, name: str):
-        key = hashlib.md5(data).hexdigest()
-        if key in cache:
-            return cache[key]
-        chunks = await doc_loader.process_bytes(data, name)
-        cache[key] = chunks
-        return chunks
-
-    tasks = []
+    # Process uploaded files
     for up in uploads:
         data = await up.read()
-        await up.seek(0)
-        tasks.append(process_bytes(data, up.filename))
-    for data, name in b64_docs:
-        try:
-            raw = base64.b64decode(data)
-        except Exception:
-            continue
-        tasks.append(process_bytes(raw, name))
+        total_size += len(data)
+        if total_size > max_total_size:
+            raise HTTPException(status_code=400, detail="Payload too large")
+        chunks = await doc_loader.process_bytes(data, up.filename)
+        texts = [c.text for c in chunks]
+        metas = [c.metadata() for c in chunks]
+        await vector_store.add_texts(texts, metas)
 
-    chunk_lists = await asyncio.gather(*tasks)
-    chunks = [c for lst in chunk_lists for c in lst]
+    # Process raw text documents from JSON payload
+    for text, name in text_docs:
+        data = text.encode("utf-8")
+        total_size += len(data)
+        if total_size > max_total_size:
+            raise HTTPException(status_code=400, detail="Payload too large")
+        chunks = await doc_loader.process_bytes(data, f"{name}.txt")
+        texts = [c.text for c in chunks]
+        metas = [c.metadata() for c in chunks]
+        await vector_store.add_texts(texts, metas)
 
-    texts = [c.text for c in chunks]
-    metas = [c.metadata() for c in chunks]
-
-    vector_store = VectorStore()
-    await vector_store.add_texts(texts, metas)
-
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------
     # Question answering
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------
     async def handle_question(q: str):
         entity_raw = await ollama_client.extract_entities(q)
         try:
@@ -172,30 +175,34 @@ async def run_query(request: Request, token: str = Depends(get_current_user)):
             keywords = " ".join(str(v) for v in entities.values())
         except Exception:
             keywords = ""
+
         search_query = f"{q} {keywords}".strip()
         retrieved = await vector_store.similarity_search(search_query, k=5)
         context = "\n\n".join([r["text"] for r in retrieved])
+
         answer_raw = await ollama_client.rag_answer(q, context)
         try:
-            answer = json.loads(answer_raw)
+            parsed = json.loads(answer_raw)
+            decision = parsed.get("decision", "")
+            justification = parsed.get("justification", "")
         except Exception:
-            answer = {"decision": answer_raw, "amount": None, "justification": ""}
-        return answer, retrieved
+            decision = answer_raw
+            justification = ""
 
-    results = await asyncio.gather(*(handle_question(q) for q in questions))
-    answers = [res[0] for res in results]
-    retrieved_all = [r for res in results for r in res[1]]
+        clauses = [
+            {"file": r.get("file_name", ""), "text": r.get("text", "")}
+            for r in retrieved
+        ]
+        return {
+            "query": q,
+            "decision": decision,
+            "justification": justification,
+            "relevant_clauses": clauses,
+        }
 
-    retrieved_clauses = [
-        {"file": r["file_name"], "page": r["page_range"], "clause": r["text"]}
-        for r in retrieved_all
-    ]
+    answers = await asyncio.gather(*(handle_question(q) for q in questions))
 
-    return RAGResponse(
-        status="success",
-        answers=answers,
-        retrieved_clauses=retrieved_clauses,
-    )
+    return RAGResponse(status="success", answers=answers)
 
 
 def custom_openapi():

@@ -11,8 +11,11 @@ client = TestClient(app)
 
 
 class DummyVectorStore:
+    def __init__(self):
+        self.entries = []
+
     async def add_texts(self, texts, metadatas):
-        self.entries = [{**m, "text": t} for t, m in zip(texts, metadatas)]
+        self.entries.extend([{**m, "text": t} for t, m in zip(texts, metadatas)])
 
     async def similarity_search(self, query: str, k: int = 5):
         return self.entries[:k]
@@ -23,7 +26,7 @@ async def fake_extract(self, query: str) -> str:
 
 
 async def fake_rag(self, question: str, context: str) -> str:
-    return '{"decision": "Approved", "amount": "50000", "justification": "Clause 12.3, Page 1"}'
+    return '{"decision": "Approved", "justification": "Clause 12.3, Page 1"}'
 
 
 @pytest.fixture(autouse=True)
@@ -44,11 +47,11 @@ def patch_dependencies(monkeypatch):
 def test_multi_document_query():
     files = [
         (
-            "documents",
+            "file",
             ("doc1.txt", b"Clause 12.3, Page 1: Knee surgery is covered.", "text/plain"),
         ),
         (
-            "documents",
+            "file",
             (
                 "doc2.txt",
                 b"Clause 8.1, Page 5: For knee surgery, maximum amount is 50000 INR.",
@@ -56,15 +59,17 @@ def test_multi_document_query():
             ),
         ),
         (
-            "documents",
+            "file",
             ("doc3.txt", b"Clause 7.3, Page 9: Heart surgery details.", "text/plain"),
         ),
     ]
-    data = {"questions": "46-year-old male, knee surgery in Pune, 3-month-old policy"}
+    data = {"question": "46-year-old male, knee surgery in Pune, 3-month-old policy"}
     headers = {"Authorization": "Bearer testtoken"}
 
     resp = client.post("/hackrx/run", files=files, data=data, headers=headers)
     assert resp.status_code == 200
     body = resp.json()
     assert body["answers"][0]["decision"] == "Approved"
+    assert body["answers"][0]["query"] == data["question"]
+    assert body["answers"][0]["relevant_clauses"][0]["file"] == "doc1.txt"
     assert "Clause" in body["answers"][0]["justification"]

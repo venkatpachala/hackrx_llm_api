@@ -1,25 +1,36 @@
 from __future__ import annotations
 
-from typing import List, Optional
+"""Pydantic schemas for responses returned by the API."""
+
+from typing import List
 
 from pydantic import BaseModel, Field
 
 
-class Answer(BaseModel):
-    decision: str = Field(..., description="Approval decision")
-    amount: Optional[str] = Field(None, description="Approved amount if applicable")
-    justification: str = Field(..., description="Clause reference for the decision")
+class RelevantClause(BaseModel):
+    """Snippet of source text that supports an answer."""
 
-
-class RetrievedClause(BaseModel):
     file: str = Field(..., description="Source file name")
-    page: str = Field(..., description="Page number or range")
-    clause: str = Field(..., description="Text of the retrieved clause")
+    text: str = Field(..., description="Exact text snippet used for the answer")
+
+
+class Answer(BaseModel):
+    """Model representing the answer for a single query."""
+
+    query: str = Field(..., description="Original question")
+    decision: str = Field(..., description="Decision or high level answer")
+    justification: str = Field(..., description="Reasoning behind the decision")
+    relevant_clauses: List[RelevantClause] = Field(
+        default_factory=list,
+        description="Document snippets that support the decision",
+    )
 
 
 class RAGResponse(BaseModel):
+    """Overall response structure returned by the RAG endpoint."""
+
     status: str = Field(..., description="Status of the request")
-    answers: List[Answer] = Field(default_factory=list, description="Answers for each question")
-    retrieved_clauses: List[RetrievedClause] = Field(
-        default_factory=list, description="Clauses used for answering"
+    answers: List[Answer] = Field(
+        default_factory=list, description="Answers for each submitted question"
     )
+
