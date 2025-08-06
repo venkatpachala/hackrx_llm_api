@@ -24,6 +24,9 @@ class VectorStore:
         self.index: Any | None = None
         self.texts: List[str] = []
         self.metadatas: List[Dict] = []
+        # Simple in-memory cache so repeated documents do not require
+        # recomputing their embeddings on subsequent requests.
+        self._cache: Dict[str, Any] = {}
 
     async def add_texts(self, texts: List[str], metadatas: List[Dict]) -> None:
         """Embed and index ``texts`` with their ``metadatas``."""
@@ -31,10 +34,15 @@ class VectorStore:
         if not texts:
             return
 
-        embeddings = await asyncio.to_thread(
-            self.model.encode, texts, show_progress_bar=False
-        )
-        vectors = self.np.array(embeddings).astype("float32")
+        missing = [t for t in texts if t not in self._cache]
+        if missing:
+            embeddings = await asyncio.to_thread(
+                self.model.encode, missing, show_progress_bar=False
+            )
+            for text, emb in zip(missing, embeddings):
+                self._cache[text] = self.np.array(emb, dtype="float32")
+
+        vectors = self.np.array([self._cache[t] for t in texts]).astype("float32")
         if self.index is None:
             self.index = self.faiss.IndexFlatL2(vectors.shape[1])
         self.index.add(vectors)
