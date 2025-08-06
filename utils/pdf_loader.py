@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from io import StringIO
-from typing import List
+from typing import List, Tuple
 
 from fastapi import UploadFile
 from pdfminer.layout import LAParams
@@ -21,8 +21,33 @@ class PDFLoader:
     large documents can be handled without exhausting RAM.
     """
 
-    def __init__(self, chunk_size: int = 1000) -> None:
+    def __init__(self, chunk_size: int = 1800) -> None:
+        # default chunk size roughly 1500-2000 characters
         self.chunk_size = chunk_size
+
+    # ------------------------------------------------------------------
+    # Chunking helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _split_text(text: str, chunk_size: int) -> Tuple[List[str], str]:
+        """Split ``text`` into chunks trying to respect sentence boundaries.
+
+        Returns a tuple of ``(chunks, remainder)`` where ``remainder`` is the
+        leftover text that didn't reach ``chunk_size``.
+        """
+
+        chunks: List[str] = []
+        while len(text) >= chunk_size:
+            # Find the last sentence break before the chunk boundary
+            split_at = text.rfind(". ", 0, chunk_size)
+            if split_at == -1 or split_at < chunk_size * 0.5:
+                # no good sentence break found, hard split
+                split_at = chunk_size
+            else:
+                split_at += 1  # include the period
+            chunks.append(text[:split_at].strip())
+            text = text[split_at:].lstrip()
+        return chunks, text
 
     async def extract_text_chunks(self, file: UploadFile) -> List[str]:
         """Extract text from ``file`` and return it as a list of chunks.
@@ -52,20 +77,22 @@ class PDFLoader:
                 device.close()
                 text = output.getvalue().replace("\n", " ")
                 buffer += text
-                while len(buffer) >= self.chunk_size:
-                    chunks.append(buffer[: self.chunk_size])
-                    buffer = buffer[self.chunk_size :]
+                new_chunks, buffer = PDFLoader._split_text(buffer, self.chunk_size)
+                chunks.extend(new_chunks)
             if buffer:
-                chunks.append(buffer)
+                chunks.append(buffer.strip())
             return chunks
 
         chunks = await asyncio.to_thread(_read_chunks)
         await file.seek(0)
         return chunks
 
-    @staticmethod
-    def chunk_text(text: str, chunk_size: int = 1000) -> List[str]:
-        """Split plain text into ``chunk_size`` character segments."""
+    def chunk_text(self, text: str, chunk_size: int | None = None) -> List[str]:
+        """Split plain text into chunks respecting sentence boundaries."""
 
-        return [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
+        size = chunk_size or self.chunk_size
+        chunks, remainder = self._split_text(text, size)
+        if remainder.strip():
+            chunks.append(remainder.strip())
+        return chunks
 

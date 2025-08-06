@@ -17,7 +17,6 @@ import uvicorn
 from utils.auth import verify_token
 from utils.pdf_loader import PDFLoader
 from utils.ollama_client import OllamaClient
-from utils.vector_store import VectorStore
 from schemas import DocumentQueryResponse
 from fastapi.openapi.utils import get_openapi
 
@@ -115,33 +114,51 @@ async def run_query(request: Request, token: str = Depends(get_current_user)):
             upload = possible_upload
             file_name = upload.filename
 
-    vector_store = VectorStore()
+    # ------------------------------------------------------------------
+    # Prepare chunks from supplied text and/or uploaded PDF
+    # ------------------------------------------------------------------
+    chunks: list[str] = []
 
     for blob in text_blobs:
-        chunks = pdf_loader.chunk_text(blob)
-        await vector_store.add_texts(chunks)
+        chunks.extend(pdf_loader.chunk_text(blob))
 
     if upload is not None:
         try:
             pdf_chunks = await pdf_loader.extract_text_chunks(upload)
-            await vector_store.add_texts(pdf_chunks)
+            chunks.extend(pdf_chunks)
             logger.info("Indexed %d chunks from %s", len(pdf_chunks), file_name)
         except Exception as exc:
             logger.error("Failed to load document: %s", exc)
 
+    # ------------------------------------------------------------------
+    # Question processing helpers
+    # ------------------------------------------------------------------
     async def process_question(question: str) -> str:
-        context_chunks = await vector_store.similarity_search(question, k=5)
-        context = "\n\n".join(context_chunks)
+        async def ask_chunk(chunk: str) -> str:
+            try:
+                return await asyncio.wait_for(
+                    ollama_client.answer_question(chunk, question), timeout=15
+                )
+            except Exception as exc:
+                logger.error("Chunk processing failed: %s", exc)
+                return ""
+
+        partial_answers = await asyncio.gather(*(ask_chunk(c) for c in chunks))
+        partial_answers = [ans for ans in partial_answers if ans]
+
+        if not partial_answers:
+            return "No relevant information found."
+
+        combined_context = "\n\n".join(partial_answers)
         try:
             return await asyncio.wait_for(
-                ollama_client.answer_question(context, question), timeout=60
+                ollama_client.answer_question(combined_context, question),
+                timeout=15,
             )
-        except asyncio.TimeoutError:
-            logger.error("Timeout while answering question: %s", question)
-            return ""
-        except Exception as exc:  # pragma: no cover - best effort logging
-            logger.error("Ollama processing error: %s", exc)
-            return ""
+        except Exception as exc:
+            logger.error("Final summarization failed: %s", exc)
+            # Return concatenated partial answers if final step fails
+            return combined_context
 
     answers = await asyncio.gather(*(process_question(q) for q in questions))
 
@@ -179,6 +196,11 @@ def custom_openapi():
 
 
 app.openapi = custom_openapi
+
+
+@app.on_event("shutdown")
+async def _shutdown_event() -> None:
+    await ollama_client.aclose()
 
 
 if __name__ == "__main__":
