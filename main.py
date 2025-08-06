@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from dotenv import load_dotenv
 
@@ -16,6 +17,7 @@ import uvicorn
 from utils.auth import verify_token
 from utils.pdf_loader import PDFLoader
 from utils.ollama_client import OllamaClient
+from utils.vector_store import VectorStore
 from schemas import DocumentQueryResponse
 from fastapi.openapi.utils import get_openapi
 
@@ -77,8 +79,9 @@ async def run_query(request: Request, token: str = Depends(get_current_user)):
     logger.info("Raw request body: %s", raw_body)
 
     questions: list[str] = []
-    document_text = ""
+    text_blobs: list[str] = []
     file_name: str | None = None
+    upload: UploadFile | None = None
 
     content_type = request.headers.get("content-type", "")
     if "application/json" in content_type:
@@ -94,7 +97,7 @@ async def run_query(request: Request, token: str = Depends(get_current_user)):
             questions.extend([q for q in q_list if isinstance(q, str)])
         docs = payload.get("documents")
         if isinstance(docs, str):
-            document_text = docs
+            text_blobs.append(docs)
     else:
         form = await request.form()
         q_single = form.get("question")
@@ -106,32 +109,46 @@ async def run_query(request: Request, token: str = Depends(get_current_user)):
                 questions.append(q)
         docs = form.get("documents")
         if isinstance(docs, str):
-            document_text = docs
-        upload = form.get("file")
-        if isinstance(upload, UploadFile):
+            text_blobs.append(docs)
+        possible_upload = form.get("file")
+        if isinstance(possible_upload, UploadFile):
+            upload = possible_upload
             file_name = upload.filename
-            data = await upload.read()
-            logger.info("Uploaded file %s (%d bytes)", file_name, len(data))
-            await upload.seek(0)
-            try:
-                pdf_text = await pdf_loader.extract_text(upload)
-                document_text = document_text + ("\n" if document_text else "") + pdf_text
-            except Exception as exc:
-                logger.error("Failed to load document: %s", exc)
 
-    answers: list[str] = []
-    for q in questions:
+    vector_store = VectorStore()
+
+    for blob in text_blobs:
+        chunks = pdf_loader.chunk_text(blob)
+        await vector_store.add_texts(chunks)
+
+    if upload is not None:
         try:
-            ans = await ollama_client.answer_question(document_text, q)
+            pdf_chunks = await pdf_loader.extract_text_chunks(upload)
+            await vector_store.add_texts(pdf_chunks)
+            logger.info("Indexed %d chunks from %s", len(pdf_chunks), file_name)
         except Exception as exc:
+            logger.error("Failed to load document: %s", exc)
+
+    async def process_question(question: str) -> str:
+        context_chunks = await vector_store.similarity_search(question, k=5)
+        context = "\n\n".join(context_chunks)
+        try:
+            return await asyncio.wait_for(
+                ollama_client.answer_question(context, question), timeout=60
+            )
+        except asyncio.TimeoutError:
+            logger.error("Timeout while answering question: %s", question)
+            return ""
+        except Exception as exc:  # pragma: no cover - best effort logging
             logger.error("Ollama processing error: %s", exc)
-            ans = ""
-        answers.append(ans)
+            return ""
+
+    answers = await asyncio.gather(*(process_question(q) for q in questions))
 
     return DocumentQueryResponse(
         status="success",
         query=questions,
-        answer=answers,
+        answer=list(answers),
         file_name=file_name,
     )
 
