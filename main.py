@@ -12,6 +12,7 @@ from fastapi import (
 )
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 import uvicorn
 
 from utils.auth import verify_token
@@ -74,9 +75,8 @@ async def health_check():
     return {"status": "healthy" if status_ok else "unhealthy"}
 
 
-@app.post("/hackrx/run", response_model=RAGResponse)
-async def run_query(request: Request, token: str = Depends(get_current_user)):
-    """Endpoint that performs retrieval augmented generation over documents."""
+async def _run_query_legacy(request: Request, token: str = Depends(get_current_user)):
+    """Legacy implementation kept for reference."""
 
     content_type = request.headers.get("content-type", "")
 
@@ -203,6 +203,114 @@ async def run_query(request: Request, token: str = Depends(get_current_user)):
     answers = await asyncio.gather(*(handle_question(q) for q in questions))
 
     return RAGResponse(status="success", answers=answers)
+
+
+@app.post("/hackrx/run", response_model=RAGResponse)
+async def run_query(request: Request, token: str = Depends(get_current_user)):
+    """Endpoint that performs retrieval augmented generation over documents."""
+    try:
+        ct = request.headers.get("content-type", "")
+        questions: list[str] = []
+        uploads: list[UploadFile] = []
+        text_docs: list[tuple[str, str]] = []
+        if "application/json" in ct:
+            try:
+                payload = await request.json()
+            except Exception:
+                payload = {}
+            q_list = payload.get("questions")
+            if isinstance(q_list, list):
+                questions.extend([q for q in q_list if isinstance(q, str)])
+            for k in ("question", "query", "q"):
+                v = payload.get(k)
+                if isinstance(v, str):
+                    questions.append(v)
+            docs = payload.get("documents", [])
+            if isinstance(docs, list):
+                for i, d in enumerate(docs):
+                    if isinstance(d, str):
+                        text_docs.append((d, f"document_{i}"))
+        else:
+            form = await request.form()
+            for k in ("question", "query", "q"):
+                v = form.get(k)
+                if isinstance(v, str):
+                    questions.append(v)
+            questions.extend([q for q in form.getlist("questions") if isinstance(q, str)])
+            for f in form.getlist("file") + form.getlist("documents"):
+                if hasattr(f, "filename"):
+                    uploads.append(f)
+        if not questions:
+            raise HTTPException(status_code=400, detail="No valid question provided")
+        if len(uploads) + len(text_docs) > 10:
+            raise HTTPException(status_code=400, detail="Too many documents")
+
+        max_size = 200 * 1024 * 1024
+        total = 0
+        store = VectorStore()
+
+        datas = await asyncio.gather(*(u.read() for u in uploads))
+        total += sum(len(d) for d in datas)
+        if total > max_size:
+            raise HTTPException(status_code=400, detail="Payload too large")
+        tasks = [doc_loader.process_bytes(d, u.filename) for d, u in zip(datas, uploads)]
+        for res in await asyncio.gather(*tasks, return_exceptions=True):
+            if isinstance(res, ValueError):
+                raise HTTPException(status_code=415, detail=str(res))
+            await store.add_texts([c.text for c in res], [c.metadata() for c in res])
+
+        text_pairs = [(t.encode("utf-8"), f"{n}.txt") for t, n in text_docs]
+        total += sum(len(d) for d, _ in text_pairs)
+        if total > max_size:
+            raise HTTPException(status_code=400, detail="Payload too large")
+        tasks = [doc_loader.process_bytes(d, n) for d, n in text_pairs]
+        for res in await asyncio.gather(*tasks, return_exceptions=True):
+            if isinstance(res, ValueError):
+                raise HTTPException(status_code=415, detail=str(res))
+            await store.add_texts([c.text for c in res], [c.metadata() for c in res])
+
+        async def answer(q: str):
+            raw = await ollama_client.extract_entities(q)
+            try:
+                ent = json.loads(raw)
+                kw = " ".join(str(v) for v in ent.values())
+            except Exception:
+                kw = ""
+            retrieved = await store.similarity_search(f"{q} {kw}".strip(), k=5)
+            context = "\n\n".join(r["text"] for r in retrieved)
+            resp = await ollama_client.rag_answer(q, context)
+            try:
+                parsed = json.loads(resp)
+                dec = parsed.get("decision", "")
+                just = parsed.get("justification", "")
+            except Exception:
+                dec = resp
+                just = ""
+            clauses = [
+                {"file": r.get("file_name", ""), "text": r.get("text", "")}
+                for r in retrieved
+            ]
+            return {
+                "query": q,
+                "decision": dec,
+                "justification": just,
+                "relevant_clauses": clauses,
+            }
+
+        ans = await asyncio.gather(*(answer(q) for q in questions))
+        return RAGResponse(status="success", answers=ans)
+    except HTTPException as exc:
+        logger.exception("RAG endpoint error: %s", exc.detail)
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"status": "error", "message": exc.detail},
+        )
+    except Exception as exc:
+        logger.exception("Unexpected error in RAG endpoint", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "message": str(exc)},
+        )
 
 
 def custom_openapi():

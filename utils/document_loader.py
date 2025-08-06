@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from io import BytesIO
 from typing import List
@@ -90,10 +91,15 @@ class DocumentLoader:
             return await asyncio.to_thread(self._process_pdf, data, file_name)
         if lower.endswith(".docx"):
             return await asyncio.to_thread(self._process_docx, data, file_name)
-        # Fallback to plain text
-        return await asyncio.to_thread(
-            self._process_text, data.decode("utf-8", errors="ignore"), file_name
-        )
+        if lower.endswith(".txt"):
+            return await asyncio.to_thread(
+                self._process_text, data.decode("utf-8", errors="ignore"), file_name
+            )
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError("Unsupported file type")
+        return await asyncio.to_thread(self._process_text, text, file_name)
 
     # --------------------------------------------------------------
     # Handlers for specific formats
@@ -102,11 +108,19 @@ class DocumentLoader:
         import fitz  # PyMuPDF
 
         doc = fitz.open(stream=data, filetype="pdf")
+
+        def handle_page(page_idx: int) -> List[str]:
+            page = doc[page_idx]
+            text = self._clean_text(page.get_text())
+            return list(self._chunk_text(text))
+
+        with ThreadPoolExecutor() as ex:
+            page_texts = list(ex.map(handle_page, range(len(doc))))
+
         chunks: List[Chunk] = []
         chunk_id = 0
-        for page_idx, page in enumerate(doc):
-            text = self._clean_text(page.get_text())
-            for piece in self._chunk_text(text):
+        for page_idx, pieces in enumerate(page_texts):
+            for piece in pieces:
                 chunks.append(Chunk(chunk_id, file_name, str(page_idx + 1), piece))
                 chunk_id += 1
         return chunks
