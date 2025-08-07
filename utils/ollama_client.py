@@ -55,18 +55,42 @@ class OllamaClient:
         )
         return await self.generate(prompt)
 
-    async def rag_answer(self, question: str, chunks: list[str]) -> str:
-        """Answer ``question`` using relevant document ``chunks`` and return JSON."""
+    async def rag_answer(
+        self, question: str, clauses: list[dict], edge_instruction: str = ""
+    ) -> str:
+        """Answer ``question`` using retrieved ``clauses`` and return JSON."""
 
-        context = "\n\n".join(chunks)
+        lines = []
+        for idx, c in enumerate(clauses, start=1):
+            lines.append(
+                f"{idx}. From {c.get('file_name', '')}, page {c.get('page_range', '')}:\n   \"{c.get('text', '')}\""
+            )
+        clause_block = "\n\n".join(lines) if lines else "None provided."
+
         prompt = (
-            "Based on the following document context, provide a structured JSON answer with:\n"
-            "- decision: Approved/Rejected\n"
-            "- amount: optional payout value\n"
-            "- justification: explanation and clause reference\n"
-            f"Context:\n{context}\n\n"
-            f"Question:\n{question}\n\nAnswer:"
+            "You are a legal/insurance assistant.\n\n"
+            f"User Query: \"{question}\"\n\n"
+            "Here are the clauses retrieved from the documents:\n\n"
+            f"{clause_block}\n\n"
+            "Use these clauses to evaluate whether the query's request is approved or not.\n"
+            "Your output must follow this JSON format:\n\n"
+            "{\n"
+            '  "query": "<user query>",\n'
+            '  "decision": "<approved | rejected | insufficient info>",\n'
+            '  "amount": "<amount if applicable>",\n'
+            '  "justification": "<brief explanation of why this decision was made>",\n'
+            '  "relevant_clauses": [\n'
+            "    {\n"
+            '      "file": "<doc name>",\n'
+            '      "page": "<page number>",\n'
+            '      "text": "<exact clause used>"\n'
+            "    }\n"
+            "  ]\n"
+            "}\n\n"
+            "You MUST only base your decision on clauses retrieved above. If no clear answer is found, say \"insufficient info\". Do NOT hallucinate."
         )
+        if edge_instruction:
+            prompt += f"\n\n{edge_instruction}"
         return await self.generate(prompt)
 
     async def test_connection(self) -> bool:

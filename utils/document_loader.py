@@ -19,12 +19,14 @@ class Chunk:
     file_name: str
     page_range: str
     text: str
+    section: str = ""
 
     def metadata(self) -> dict:
         return {
             "chunk_id": self.chunk_id,
             "file_name": self.file_name,
             "page_range": self.page_range,
+            "section": self.section,
         }
 
 
@@ -125,7 +127,8 @@ class DocumentLoader:
         chunk_id = 0
         for page_idx, pieces in enumerate(page_texts):
             for piece in pieces:
-                chunks.append(Chunk(chunk_id, file_name, str(page_idx + 1), piece))
+                section = self._infer_section(piece)
+                chunks.append(Chunk(chunk_id, file_name, str(page_idx + 1), piece, section))
                 chunk_id += 1
         return chunks
 
@@ -149,7 +152,8 @@ class DocumentLoader:
         chunks: List[Chunk] = []
         chunk_id = 0
         for piece in self._chunk_text(cleaned):
-            chunks.append(Chunk(chunk_id, file_name, "1", piece))
+            section = self._infer_section(piece)
+            chunks.append(Chunk(chunk_id, file_name, "1", piece, section))
             chunk_id += 1
         return chunks
 
@@ -163,7 +167,8 @@ class DocumentLoader:
         chunks: List[Chunk] = []
         chunk_id = 0
         for piece in self._chunk_text(cleaned):
-            chunks.append(Chunk(chunk_id, file_name, "1", piece))
+            section = self._infer_section(piece)
+            chunks.append(Chunk(chunk_id, file_name, "1", piece, section))
             chunk_id += 1
         return chunks
 
@@ -176,7 +181,8 @@ class DocumentLoader:
         chunks: List[Chunk] = []
         chunk_id = 0
         for piece in self._chunk_text(cleaned):
-            chunks.append(Chunk(chunk_id, file_name, "1", piece))
+            section = self._infer_section(piece)
+            chunks.append(Chunk(chunk_id, file_name, "1", piece, section))
             chunk_id += 1
         return chunks
 
@@ -185,6 +191,20 @@ class DocumentLoader:
         chunks: List[Chunk] = []
         chunk_id = 0
         for piece in self._chunk_text(cleaned):
-            chunks.append(Chunk(chunk_id, file_name, "1", piece))
+            section = self._infer_section(piece)
+            chunks.append(Chunk(chunk_id, file_name, "1", piece, section))
             chunk_id += 1
         return chunks
+
+    # --------------------------------------------------------------
+    # Section inference
+    # --------------------------------------------------------------
+    def _infer_section(self, text: str) -> str:
+        """Very lightweight heuristic to tag text with a section name."""
+
+        lower = text.lower()
+        if "exclusion" in lower:
+            return "exclusion"
+        if any(k in lower for k in ["inclusion", "covered", "coverage", "benefit"]):
+            return "inclusion"
+        return ""

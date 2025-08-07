@@ -26,6 +26,9 @@ class Answer(BaseModel):
         default_factory=list,
         description="Document snippets that support the decision",
     )
+    confidence: str = Field(
+        "", description="Heuristic confidence level for the decision"
+    )
 
 
 class RAGResponse(BaseModel):
