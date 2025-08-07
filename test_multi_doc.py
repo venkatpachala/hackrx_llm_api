@@ -25,8 +25,8 @@ async def fake_extract(self, query: str) -> str:
     return '{"procedure": "knee surgery"}'
 
 
-async def fake_rag(self, question: str, context: str) -> str:
-    return '{"decision": "Approved", "justification": "Clause 12.3, Page 1"}'
+async def fake_rag(self, question: str, chunks: list[str]) -> str:
+    return '{"decision": "Approved", "amount": "50000", "justification": "Clause 12.3, Page 1"}'
 
 
 @pytest.fixture(autouse=True)
@@ -70,6 +70,8 @@ def test_multi_document_query():
     assert resp.status_code == 200
     body = resp.json()
     assert body["answers"][0]["decision"] == "Approved"
+    assert body["answers"][0]["amount"] == "50000"
     assert body["answers"][0]["query"] == data["question"]
     assert body["answers"][0]["relevant_clauses"][0]["file"] == "doc1.txt"
+    assert body["answers"][0]["relevant_clauses"][0]["page"] == "1"
     assert "Clause" in body["answers"][0]["justification"]

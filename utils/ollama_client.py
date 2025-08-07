@@ -55,13 +55,17 @@ class OllamaClient:
         )
         return await self.generate(prompt)
 
-    async def rag_answer(self, question: str, context: str) -> str:
-        """Answer ``question`` using ``context`` and return JSON output."""
+    async def rag_answer(self, question: str, chunks: list[str]) -> str:
+        """Answer ``question`` using relevant document ``chunks`` and return JSON."""
 
+        context = "\n\n".join(chunks)
         prompt = (
-            "You are an insurance assistant. Use only the provided context to answer the question. "
-            "Respond in JSON with fields: decision, amount, justification.\n\nContext:\n"
-            f"{context}\n\nQuestion:\n{question}\nAnswer JSON:"
+            "Based on the following document context, provide a structured JSON answer with:\n"
+            "- decision: Approved/Rejected\n"
+            "- amount: optional payout value\n"
+            "- justification: explanation and clause reference\n"
+            f"Context:\n{context}\n\n"
+            f"Question:\n{question}\n\nAnswer:"
         )
         return await self.generate(prompt)
 

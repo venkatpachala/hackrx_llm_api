@@ -11,6 +11,7 @@ class RelevantClause(BaseModel):
     """Snippet of source text that supports an answer."""
 
     file: str = Field(..., description="Source file name")
+    page: str = Field("", description="Page number or range within the source")
     text: str = Field(..., description="Exact text snippet used for the answer")
 
 
@@ -19,6 +20,7 @@ class Answer(BaseModel):
 
     query: str = Field(..., description="Original question")
     decision: str = Field(..., description="Decision or high level answer")
+    amount: str = Field("", description="Payout amount if applicable")
     justification: str = Field(..., description="Reasoning behind the decision")
     relevant_clauses: List[RelevantClause] = Field(
         default_factory=list,

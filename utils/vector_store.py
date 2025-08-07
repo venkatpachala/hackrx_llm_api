@@ -45,7 +45,7 @@ class VectorStore:
         vectors = self.np.array([self._cache[t] for t in texts]).astype("float32")
         if self.index is None:
             self.index = self.faiss.IndexFlatL2(vectors.shape[1])
-        self.index.add(vectors)
+        await asyncio.to_thread(self.index.add, vectors)
         self.texts.extend(texts)
         self.metadatas.extend(metadatas)
 
@@ -58,7 +58,7 @@ class VectorStore:
             self.model.encode, [query], show_progress_bar=False
         )
         vector = self.np.array(embedding).astype("float32")
-        _, idxs = self.index.search(vector, k)
+        _, idxs = await asyncio.to_thread(self.index.search, vector, k)
         results: List[Dict] = []
         for i in idxs[0]:
             if i < len(self.texts):

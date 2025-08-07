@@ -9,3 +9,4 @@ sentence-transformers
 faiss-cpu
 PyMuPDF
 python-docx
+extract-msg

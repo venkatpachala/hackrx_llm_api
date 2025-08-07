@@ -240,6 +240,13 @@ async def run_query(request: Request, token: str = Depends(get_current_user)):
             for f in form.getlist("file") + form.getlist("documents"):
                 if hasattr(f, "filename"):
                     uploads.append(f)
+
+        logger.info(
+            "Payload received: questions=%s, uploads=%s, text_docs=%s",
+            questions,
+            [u.filename for u in uploads],
+            [n for _, n in text_docs],
+        )
         if not questions:
             raise HTTPException(status_code=400, detail="No valid question provided")
         if len(uploads) + len(text_docs) > 10:
@@ -270,35 +277,51 @@ async def run_query(request: Request, token: str = Depends(get_current_user)):
             await store.add_texts([c.text for c in res], [c.metadata() for c in res])
 
         async def answer(q: str):
+            logger.info("Processing query: %s", q)
             raw = await ollama_client.extract_entities(q)
+            logger.info("Extracted entities: %s", raw)
             try:
                 ent = json.loads(raw)
                 kw = " ".join(str(v) for v in ent.values())
             except Exception:
                 kw = ""
-            retrieved = await store.similarity_search(f"{q} {kw}".strip(), k=5)
-            context = "\n\n".join(r["text"] for r in retrieved)
-            resp = await ollama_client.rag_answer(q, context)
+            semantic_query = f"{q} {kw}".strip()
+            retrieved = await store.similarity_search(semantic_query, k=5)
+            logger.info("Search results: %s", retrieved)
+            chunk_texts = [r["text"] for r in retrieved]
+            resp = await ollama_client.rag_answer(q, chunk_texts)
+            logger.info("LLM response: %s", resp)
             try:
                 parsed = json.loads(resp)
                 dec = parsed.get("decision", "")
+                amt = parsed.get("amount", "")
                 just = parsed.get("justification", "")
             except Exception:
                 dec = resp
+                amt = ""
                 just = ""
             clauses = [
-                {"file": r.get("file_name", ""), "text": r.get("text", "")}
+                {
+                    "file": r.get("file_name", ""),
+                    "page": r.get("page_range", ""),
+                    "text": r.get("text", ""),
+                }
                 for r in retrieved
             ]
-            return {
+            result = {
                 "query": q,
                 "decision": dec,
+                "amount": amt,
                 "justification": just,
                 "relevant_clauses": clauses,
             }
+            logger.info("Final answer: %s", result)
+            return result
 
         ans = await asyncio.gather(*(answer(q) for q in questions))
-        return RAGResponse(status="success", answers=ans)
+        final = RAGResponse(status="success", answers=ans)
+        logger.info("Final JSON returned: %s", final.model_dump())
+        return final
     except HTTPException as exc:
         logger.exception("RAG endpoint error: %s", exc.detail)
         return JSONResponse(
