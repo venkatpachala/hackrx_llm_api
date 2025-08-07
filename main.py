@@ -284,12 +284,96 @@ async def run_query(request: Request, token: str = Depends(get_current_user)):
                 ent = json.loads(raw)
                 kw = " ".join(str(v) for v in ent.values())
             except Exception:
+                ent = {}
                 kw = ""
+
+            procedure = str(ent.get("procedure", ""))
+            q_lower = q.lower()
+            section_filter = None
+            if any(w in q_lower for w in ["not cover", "not covered", "exclude", "exclusion", "rejected", "reject"]):
+                section_filter = "exclusion"
+            elif any(w in q_lower for w in ["cover", "covered", "claim", "approve", "approval", "inclusion", "include"]):
+                section_filter = "inclusion"
+
             semantic_query = f"{q} {kw}".strip()
-            retrieved = await store.similarity_search(semantic_query, k=5)
+            retrieved = await store.similarity_search(semantic_query, k=5, section=section_filter)
             logger.info("Search results: %s", retrieved)
-            chunk_texts = [r["text"] for r in retrieved]
-            resp = await ollama_client.rag_answer(q, chunk_texts)
+
+            procedure_found = False
+            if procedure:
+                proc_lower = procedure.lower()
+                for r in retrieved:
+                    if proc_lower in r.get("text", "").lower():
+                        procedure_found = True
+                        break
+
+            inclusion_words = ["cover", "covered", "approve", "approved", "include"]
+            exclusion_words = ["not covered", "exclude", "excluded", "reject", "rejected"]
+            inclusion = any(any(w in r.get("text", "").lower() for w in inclusion_words) for r in retrieved)
+            exclusion = any(any(w in r.get("text", "").lower() for w in exclusion_words) for r in retrieved)
+            conflict = inclusion and exclusion
+
+            clauses = [
+                {
+                    "file_name": r.get("file_name", ""),
+                    "page_range": r.get("page_range", ""),
+                    "text": r.get("text", ""),
+                    "score": r.get("score", 0.0),
+                }
+                for r in retrieved
+            ]
+
+            if not clauses:
+                return {
+                    "query": q,
+                    "decision": "insufficient info",
+                    "amount": "",
+                    "justification": "No relevant clauses were found in the provided documents.",
+                    "relevant_clauses": [],
+                    "confidence": "low",
+                }
+
+            if not procedure_found and procedure:
+                just = (
+                    f"The available clauses do not explicitly mention {procedure}. "
+                    "Based on general hospitalization rules, the procedure may be covered if hospitalization is required, unless excluded elsewhere."
+                )
+                return {
+                    "query": q,
+                    "decision": "insufficient info",
+                    "amount": "",
+                    "justification": just,
+                    "relevant_clauses": [
+                        {
+                            "file": c["file_name"],
+                            "page": c["page_range"],
+                            "text": c["text"],
+                        }
+                        for c in clauses
+                    ],
+                    "confidence": "low",
+                }
+
+            if conflict:
+                just = "The policy has conflicting clauses. Further manual review is needed to determine approval status."
+                return {
+                    "query": q,
+                    "decision": "insufficient info",
+                    "amount": "",
+                    "justification": just,
+                    "relevant_clauses": [
+                        {
+                            "file": c["file_name"],
+                            "page": c["page_range"],
+                            "text": c["text"],
+                        }
+                        for c in clauses
+                    ],
+                    "confidence": "low",
+                }
+
+            edge_instruction = ""
+            resp = await ollama_client.rag_answer(q, clauses, edge_instruction)
             logger.info("LLM response: %s", resp)
             try:
                 parsed = json.loads(resp)
@@ -300,20 +384,29 @@ async def run_query(request: Request, token: str = Depends(get_current_user)):
                 dec = resp
                 amt = ""
                 just = ""
-            clauses = [
-                {
-                    "file": r.get("file_name", ""),
-                    "page": r.get("page_range", ""),
-                    "text": r.get("text", ""),
-                }
-                for r in retrieved
-            ]
+
+            best_score = max((c.get("score", 0.0) for c in clauses), default=0.0)
+            if best_score > 0.8:
+                conf = "high"
+            elif best_score > 0.5:
+                conf = "medium"
+            else:
+                conf = "low"
+
             result = {
                 "query": q,
                 "decision": dec,
                 "amount": amt,
                 "justification": just,
-                "relevant_clauses": clauses,
+                "relevant_clauses": [
+                    {
+                        "file": c["file_name"],
+                        "page": c["page_range"],
+                        "text": c["text"],
+                    }
+                    for c in clauses
+                ],
+                "confidence": conf,
             }
             logger.info("Final answer: %s", result)
             return result

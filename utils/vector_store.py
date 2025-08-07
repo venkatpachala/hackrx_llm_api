@@ -49,8 +49,13 @@ class VectorStore:
         self.texts.extend(texts)
         self.metadatas.extend(metadatas)
 
-    async def similarity_search(self, query: str, k: int = 5) -> List[Dict]:
-        """Return the top ``k`` chunks most similar to ``query``."""
+    async def similarity_search(
+        self, query: str, k: int = 5, section: str | None = None
+    ) -> List[Dict]:
+        """Return the top ``k`` chunks most similar to ``query``.
+
+        Optionally filter results to those matching a ``section`` tag.
+        """
 
         if not self.index or not self.texts:
             return []
@@ -58,11 +63,17 @@ class VectorStore:
             self.model.encode, [query], show_progress_bar=False
         )
         vector = self.np.array(embedding).astype("float32")
-        _, idxs = await asyncio.to_thread(self.index.search, vector, k)
+        search_k = max(k * 3, 10)
+        distances, idxs = await asyncio.to_thread(self.index.search, vector, search_k)
         results: List[Dict] = []
-        for i in idxs[0]:
+        for dist, i in zip(distances[0], idxs[0]):
             if i < len(self.texts):
                 meta = self.metadatas[i].copy()
                 meta["text"] = self.texts[i]
+                meta["score"] = float(1 / (1 + dist))
+                if section and meta.get("section", "").lower() != section.lower():
+                    continue
                 results.append(meta)
+                if len(results) >= k:
+                    break
         return results
