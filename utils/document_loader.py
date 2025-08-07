@@ -91,6 +91,10 @@ class DocumentLoader:
             return await asyncio.to_thread(self._process_pdf, data, file_name)
         if lower.endswith(".docx"):
             return await asyncio.to_thread(self._process_docx, data, file_name)
+        if lower.endswith(".eml"):
+            return await asyncio.to_thread(self._process_eml, data, file_name)
+        if lower.endswith(".msg"):
+            return await asyncio.to_thread(self._process_msg, data, file_name)
         if lower.endswith(".txt"):
             return await asyncio.to_thread(
                 self._process_text, data.decode("utf-8", errors="ignore"), file_name
@@ -123,6 +127,44 @@ class DocumentLoader:
             for piece in pieces:
                 chunks.append(Chunk(chunk_id, file_name, str(page_idx + 1), piece))
                 chunk_id += 1
+        return chunks
+
+    def _process_eml(self, data: bytes, file_name: str) -> List[Chunk]:
+        from email import policy
+        from email.parser import BytesParser
+
+        msg = BytesParser(policy=policy.default).parsebytes(data)
+        body = ""
+        if msg.is_multipart():
+            for part in msg.walk():
+                if part.get_content_type() == "text/plain":
+                    payload = part.get_payload(decode=True) or b""
+                    charset = part.get_content_charset() or "utf-8"
+                    body += payload.decode(charset, errors="ignore")
+        else:
+            payload = msg.get_payload(decode=True) or b""
+            charset = msg.get_content_charset() or "utf-8"
+            body = payload.decode(charset, errors="ignore")
+        cleaned = self._clean_text(body)
+        chunks: List[Chunk] = []
+        chunk_id = 0
+        for piece in self._chunk_text(cleaned):
+            chunks.append(Chunk(chunk_id, file_name, "1", piece))
+            chunk_id += 1
+        return chunks
+
+    def _process_msg(self, data: bytes, file_name: str) -> List[Chunk]:
+        import extract_msg
+
+        msg = extract_msg.Message(BytesIO(data))
+        body = msg.body or ""
+        msg.close()
+        cleaned = self._clean_text(body)
+        chunks: List[Chunk] = []
+        chunk_id = 0
+        for piece in self._chunk_text(cleaned):
+            chunks.append(Chunk(chunk_id, file_name, "1", piece))
+            chunk_id += 1
         return chunks
 
     def _process_docx(self, data: bytes, file_name: str) -> List[Chunk]:
